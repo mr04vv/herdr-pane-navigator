@@ -5,7 +5,7 @@
 One fuzzy tree over every workspace, tab, and pane in [herdr](https://herdr.dev),
 led by what each pane is actually doing. Coding agents put the current task in
 their terminal title; this navigator makes that the thing you read, so three
-Claude panes stop looking like three rows that all say `claude`.
+agent panes stop looking like three rows that all say `claude`.
 
 Rows are ordered `blocked > done > working > idle`, and a workspace or tab
 inherits the urgency of its most urgent descendant — so the workspace holding a
