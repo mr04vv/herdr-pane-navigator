@@ -1,0 +1,21 @@
+id = "pane-navigator"
+name = "Pane Navigator"
+version = "0.1.0"
+min_herdr_version = "0.7.3"
+description = "Navigate workspaces, tabs, and panes as one tree, led by each pane's title."
+platforms = ["linux", "macos"]
+
+# No [[build]] section: the plugin is a shell script, so there is nothing to
+# compile. herdr runs the command as-is from the plugin directory.
+
+[[actions]]
+id = "open"
+title = "Pane Navigator: open"
+contexts = ["workspace", "global"]
+command = ["./pane-navigator.sh", "open"]
+
+[[panes]]
+id = "navigator"
+title = "Pane Navigator"
+placement = "overlay"
+command = ["./pane-navigator.sh", "ui"]
