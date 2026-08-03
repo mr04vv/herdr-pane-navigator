@@ -1,67 +1,34 @@
-# Herdr Pane Navigator
+# herdr-pane-navigator
 
-One fuzzy tree over every workspace, tab, and pane in [Herdr](https://herdr.dev) — led by
-what each pane is actually **doing**, not just where it lives.
+![Demo](https://raw.githubusercontent.com/mr04vv/herdr-pane-navigator/main/docs/assets/demo.gif)
 
-```
-WS  * dotfiles                                        2 tabs, 3 panes
-TAB * ├─ monoweb                                      2 panes
-PN  * │  ├─ Fix the flaky auth test                   claude
-PN  - │  └─ ~/src/api
-TAB - └─ ~/dotfiles                                   #1 · 1 panes
-PN  -    └─ ~/dotfiles
+One fuzzy tree over every workspace, tab, and pane in [herdr](https://herdr.dev),
+led by what each pane is actually doing. Coding agents put the current task in
+their terminal title; this navigator makes that the thing you read, so three
+Claude panes stop looking like three rows that all say `claude`.
 
-WS  ! api                                             1 tabs, 2 panes
-TAB ! └─ server                                       2 panes
-PN  !    ├─ Add rate limiting to /v1/search           claude
-PN  -    └─ ~/src/api
-```
+Rows are ordered `blocked > done > working > idle`, and a workspace or tab
+inherits the urgency of its most urgent descendant — so the workspace holding a
+blocked agent floats to the top without the tree coming apart. The pane you are
+currently in sorts last, so `enter` takes you somewhere else.
 
-## Why
-
-Herdr's built-in navigator lists `workspace → tab → agent`, but never shows an agent's
-terminal title. With three Claude panes open you get three rows that all say `claude`,
-and the only way to tell them apart is to visit each one.
-
-Coding agents set their terminal title to a summary of the current task. This navigator
-puts that front and center, so you can see at a glance which pane is doing what.
-
-## Features
-
-- **One tree, not two views.** Workspaces, tabs, and panes in a single list — no toggling
-  between a "workspace view" and an "agent view" to find what you want.
-- **Urgency-aware ordering.** Rows sort `blocked > done > working > idle`, and a parent
-  inherits the urgency of its most urgent descendant, so a workspace holding a blocked
-  agent floats to the top *without* breaking the nesting. The pane you are currently in
-  sorts last — `enter` should take you somewhere else.
-- **Borrowed tab titles.** An unnamed tab shows as `1`, `2`, … in Herdr. Here it borrows a
-  title from a pane inside it (preferring an agent pane), keeping the number as `#1`.
-- **Vim-modal.** `j`/`k` to move, `/` to search, `esc` back to normal mode.
-- **Live preview.** `p` shows the pane's recent output — read the permission prompt a
-  blocked agent is stuck on before you jump.
-- **Correct CJK alignment.** Columns line up even when titles are Japanese, Chinese, or
-  Korean. Wide characters are measured as two cells rather than by byte count.
+Press `a` inside the navigator to flip to a flat, agent-only list, and `s` to go
+back to the full tree.
 
 ## Requirements
 
-`herdr` ≥ 0.7.3, `fzf` ≥ 0.45, `jq`, `bash` ≥ 4, `python3`, and `nc`.
+`herdr` ≥ 0.7.3, `fzf` ≥ 0.45, `jq`, `bash` ≥ 4, `python3`, `nc`.
 
-`python3` is used for one thing: measuring display width so that full-width characters do
-not break column alignment. `nc` talks to Herdr's socket for `pane.focus`, which the CLI
-does not expose by id.
-
-macOS ships bash 3.2 — install a newer one (`brew install bash`, or via Nix) if you are
-on stock macOS.
+`python3` only measures display width, so that full-width CJK titles do not
+break column alignment; `nc` reaches herdr's socket for `pane.focus`, which the
+CLI does not expose by id. macOS ships bash 3.2 — install a newer one if you are
+on a stock system.
 
 ## Install
 
 ```sh
-herdr plugin install mr04vv/herdr-pane-navigator --yes
-```
-
-Or from a local checkout:
-
-```sh
+herdr plugin install mr04vv/herdr-pane-navigator   # from GitHub
+# or, from a local checkout:
 herdr plugin link /path/to/herdr-pane-navigator
 ```
 
@@ -75,36 +42,46 @@ command = "pane-navigator.open"
 description = "navigate workspaces, tabs, and panes by title"
 ```
 
-```sh
-herdr server reload-config
-```
+and `herdr server reload-config`.
 
 ## Keys
 
-The navigator opens in normal mode, so single letters are commands rather than query text.
+The navigator opens in normal mode, so single letters are commands rather than
+query text.
 
 | Key | Action |
 | --- | --- |
 | `j` / `k` | move down / up |
-| `g` / `G` | jump to first / last |
+| `g` / `G` | first / last |
 | `enter` | focus the selected workspace, tab, or pane |
-| `/` | enter search mode |
-| `esc` | leave search mode (back to normal) |
-| `a` | agents only |
-| `s` | show everything |
+| `/` | search |
+| `esc` | leave search, back to normal mode |
+| `a` / `s` | agents only / everything |
 | `r` | reload |
 | `p` | toggle preview |
 | `q` | quit |
 
-`ctrl-a`, `ctrl-s`, `ctrl-r`, and `ctrl-/` do the same as their unprefixed counterparts,
-and keep working while you are typing a search.
+`ctrl-a`, `ctrl-s`, `ctrl-r`, and `ctrl-/` do the same as their unprefixed
+counterparts and keep working while you type a search.
+
+## Tab titles
+
+An unnamed tab is just `1`, `2`, … in herdr, which says nothing about what is in
+it. Here a tab with no name of its own borrows a title from a pane inside it,
+preferring an agent pane, and keeps its number in the right-hand column as `#1`.
+
+## Preview
+
+`p` shows the pane's recent output — the exact permission prompt a `blocked`
+agent is stuck on, for instance — so you can decide before jumping. `r` refreshes
+everything.
 
 ## Status icons
 
 | Icon | Meaning |
 | --- | --- |
-| `!` red | `blocked` — waiting on you |
-| `*` cyan | `done` — just finished a turn |
+| `!` red | `blocked`, waiting on you |
+| `*` cyan | `done`, just finished a turn |
 | `*` yellow | `working` |
 | `*` green | `idle` |
 | `-` dim | no agent detected |
