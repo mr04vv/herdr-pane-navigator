@@ -47,8 +47,9 @@ and `herdr server reload-config`.
 
 ## Keys
 
-The navigator opens in normal mode, so single letters are commands rather than
-query text.
+The navigator opens in normal mode with the input line hidden, so single letters
+are commands rather than query text — and there is no stray caret. `/` reveals
+the input to search; `esc` hides it again.
 
 | Key | Action |
 | --- | --- |
@@ -73,9 +74,16 @@ preferring an agent pane, and keeps its number in the right-hand column as `#1`.
 
 ## Preview
 
-`p` shows the pane's on-screen output — the exact permission prompt a `blocked`
-agent is stuck on, for instance — so you can decide before jumping. `r` refreshes
-everything.
+`p` toggles a preview of whatever is selected, headed by a status dot in the same
+colors as the list:
+
+- **A pane** shows a header (agent · status · cwd, plus the conversation title)
+  above its live on-screen output — in the pane's own colors — so you see the
+  exact permission prompt a `blocked` agent is stuck on before jumping.
+- **A tab** shows the panes inside it, each with its status and title.
+- **A workspace** shows its tabs, with the panes nested under each.
+
+`r` refreshes everything.
 
 ## Status icons
 

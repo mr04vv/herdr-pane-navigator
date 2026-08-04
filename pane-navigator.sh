@@ -287,18 +287,131 @@ api_call() {
     head -1
 }
 
-# Preview pane: recent output for agents, structure for the rest.
+# Colors for preview, matching the icon palette in format_rows so the list and
+# the preview read as one thing: blocked red, working yellow, idle green, done
+# cyan, everything else dim.
+readonly C_RESET=$'\033[0m'
+readonly C_DIM=$'\033[90m'
+readonly C_BOLD=$'\033[1m'
+
+# Status dot + color for a given agent_status, emitted as "<color>●".
+status_dot() {
+  case "$1" in
+    blocked) printf '\033[31m!'  ;;
+    working) printf '\033[33m●'  ;;
+    idle)    printf '\033[32m●'  ;;
+    done)    printf '\033[36m●'  ;;
+    *)       printf '\033[90m○'  ;;
+  esac
+}
+
+# cwd shortened to ~ for readability in a header.
+short_cwd() { printf '%s' "${1/#$HOME/\~}"; }
+
+# A full-width rule under the header. 60 cells is a touch under the 50%%-wide
+# preview pane at typical widths, and wrap handles the rest.
+rule() { printf '%s%s%s\n' "$C_DIM" "────────────────────────────────────────────────────────────" "$C_RESET"; }
+
+# One "<dot> <agent/shell> <status> <title|cwd>" line for a pane, used by the
+# tab/workspace previews to list what lives inside.
+pane_line() {
+  local indent="$1" pane_json="$2"
+  printf '%s' "$pane_json" | jq -r '
+    def kind: if (.agent // "") != "" then .agent else "shell" end;
+    def title:
+      ((.tokens.codex_title? // .terminal_title_stripped // "") | gsub("^\\s+|\\s+$"; ""));
+    def line: if title != "" then title else (.cwd // "/") end;
+    "\(.agent_status // "unknown")\t\(kind)\t\(line)"
+  ' 2>/dev/null | while IFS=$'\t' read -r status kind line; do
+    printf '%s%s%s %s%-6s%s %s\n' \
+      "$indent" "$(status_dot "$status")" "$C_RESET" \
+      "$C_DIM" "$kind" "$C_RESET" "$line"
+  done
+}
+
+# Header block shared by all three preview kinds: a status dot, a bold summary
+# line, an optional second line, then a rule. Keeps the previews visually aligned.
+preview_header() {
+  local status="$1" summary="$2" second="$3"
+  printf '%s %s%s%s\n' "$(status_dot "$status")$C_RESET" "$C_BOLD" "$summary" "$C_RESET"
+  [ -n "$second" ] && printf '  %s\n' "$second"
+  rule
+}
+
+# Preview: for a pane, a header plus its live (colored) screen; for a tab or
+# workspace, a header plus the tree of what lives inside it -- not raw JSON.
 cmd_preview() {
   local kind="${1:-}" id="${2:-}"
   case "$kind" in
     spacer) : ;;
-    # --source visible, not the default recent: recent returns only what has
-    # newly scrolled by, so an idle shell pane reads back empty. visible is
-    # whatever is on screen right now, which an idle pane still has, and an
-    # active agent pane renders the same either way.
-    pane)   herdr pane read "$id" --source visible --lines 40 2>/dev/null || echo '(no output)' ;;
-    tab)    herdr tab get "$id" 2>/dev/null | jq . 2>/dev/null || echo '(no detail)' ;;
-    *)      herdr workspace get "$id" 2>/dev/null | jq . 2>/dev/null || echo '(no detail)' ;;
+    pane)
+      local p
+      p="$(herdr pane list 2>/dev/null | jq -c --arg id "$id" '.result.panes[] | select(.pane_id == $id)' 2>/dev/null)"
+      if [ -n "$p" ]; then
+        local status kind_label title cwd
+        status="$(printf '%s' "$p" | jq -r '.agent_status // "unknown"')"
+        kind_label="$(printf '%s' "$p" | jq -r 'if (.agent // "") != "" then .agent else "shell" end')"
+        title="$(printf '%s' "$p" | jq -r '((.tokens.codex_title? // .terminal_title_stripped // "") | gsub("^\\s+|\\s+$"; ""))')"
+        cwd="$(short_cwd "$(printf '%s' "$p" | jq -r '.cwd // "/"')")"
+        # Second line is the conversation title. A shell pane usually has none,
+        # or its terminal title is just the cwd -- already in the header, so drop
+        # it rather than print the path twice.
+        [ "$title" = "$cwd" ] && title=""
+        preview_header "$status" "$kind_label · $status · $cwd" "$title"
+      fi
+      # --format ansi keeps the pane's own colors; --source visible so an idle
+      # shell pane (no newly scrolled output) still previews what is on screen.
+      herdr pane read "$id" --source visible --format ansi --lines 40 2>/dev/null || echo '(no output)'
+      ;;
+    tab)
+      local t
+      t="$(herdr tab list 2>/dev/null | jq -c --arg id "$id" '.result.tabs[] | select(.tab_id == $id)' 2>/dev/null)"
+      if [ -n "$t" ]; then
+        local status label num pc
+        status="$(printf '%s' "$t" | jq -r '.agent_status // "unknown"')"
+        num="$(printf '%s' "$t" | jq -r '.number // 0')"
+        pc="$(printf '%s' "$t" | jq -r '.pane_count // 0')"
+        # An unnamed tab's label is just its number, which "#N" already shows;
+        # only append a real name.
+        label="$(printf '%s' "$t" | jq -r 'if (.label // "" | test("^[0-9]*$")) then "" else " · " + .label end')"
+        preview_header "$status" "TAB #$num$label · $pc panes" ""
+      else
+        echo '(no detail)'
+      fi
+      herdr pane list 2>/dev/null \
+        | jq -c --arg id "$id" '.result.panes[] | select(.tab_id == $id)' 2>/dev/null \
+        | while IFS= read -r pane; do pane_line "  " "$pane"; done
+      ;;
+    workspace)
+      local w
+      w="$(herdr workspace list 2>/dev/null | jq -c --arg id "$id" '.result.workspaces[] | select(.workspace_id == $id)' 2>/dev/null)"
+      if [ -n "$w" ]; then
+        local status label tc pc
+        status="$(printf '%s' "$w" | jq -r '.agent_status // "unknown"')"
+        label="$(printf '%s' "$w" | jq -r '.label // ""')"
+        tc="$(printf '%s' "$w" | jq -r '.tab_count // 0')"
+        pc="$(printf '%s' "$w" | jq -r '.pane_count // 0')"
+        preview_header "$status" "WS · $label · $tc tabs, $pc panes" ""
+      else
+        echo '(no detail)'
+      fi
+      # Each tab in the workspace, with its panes nested under it.
+      local panes_json tabs_json
+      panes_json="$(herdr pane list 2>/dev/null)"
+      tabs_json="$(herdr tab list 2>/dev/null)"
+      printf '%s' "$tabs_json" \
+        | jq -c --arg id "$id" '.result.tabs[] | select(.workspace_id == $id)' 2>/dev/null \
+        | while IFS= read -r tab; do
+            local tid tlabel tnum
+            tid="$(printf '%s' "$tab" | jq -r '.tab_id')"
+            tnum="$(printf '%s' "$tab" | jq -r '.number // 0')"
+            tlabel="$(printf '%s' "$tab" | jq -r 'if (.label // "" | test("^[0-9]*$")) then "" else .label end')"
+            printf '%s#%s%s %s\n' "$C_DIM" "$tnum" "$C_RESET" "$tlabel"
+            printf '%s' "$panes_json" \
+              | jq -c --arg tid "$tid" '.result.panes[] | select(.tab_id == $tid)' 2>/dev/null \
+              | while IFS= read -r pane; do pane_line "    " "$pane"; done
+          done
+      ;;
   esac
 }
 
@@ -320,16 +433,20 @@ cmd_ui() {
   local self selection kind id
   self="$(printf '%q' "$SELF")"
 
-  # Modal, vim style. The navigator starts in normal mode: --disabled turns the
-  # query off so j/k/g/G are free to move the cursor, and "/" re-enables search.
-  # Leaving search with esc drops back to normal mode instead of quitting, so
-  # esc only exits from normal mode.
+  # Modal, vim style. The navigator starts in normal mode with --no-input, which
+  # hides the input line entirely -- so there is no caret blinking in normal mode
+  # and an unbound printable key (d, x, 1, ...) has nowhere to land instead of
+  # silently entering a hidden query. "/" reveals the input with show-input to
+  # search; esc hides it again and drops back to normal mode.
   #
-  # Every single-letter binding has to be released while searching or it would
-  # be swallowed instead of reaching the query; leaving search rebinds them all.
-  # esc is the inverse -- live only while searching -- so normal mode exits on q.
-  local normal_binds='unbind(j,k,g,G,/,q,a,s,r,p)'
-  local vim_binds='rebind(j,k,g,G,/,q,a,s,r,p)'
+  # Every single-letter binding has to be released while searching or it would be
+  # swallowed instead of reaching the query; leaving search rebinds them all. esc
+  # is the inverse -- live only while searching -- so normal mode exits on q.
+  #
+  # enter_search runs when "/" switches into search mode; enter_normal when esc
+  # returns. (Named for the mode they enter, not the keys they map.)
+  local enter_search='show-input+unbind(j,k,g,G,/,q,a,s,r,p)+rebind(esc)'
+  local enter_normal='hide-input+rebind(j,k,g,G,/,q,a,s,r,p)+clear-query+unbind(esc)'
 
   # --with-nth=3.. hides the dispatch prefix while leaving it in the output.
   # ctrl-a swaps the source to agents only and ctrl-s swaps it back, which is
@@ -339,8 +456,8 @@ cmd_ui() {
       --ansi \
       --delimiter="$SEP" \
       --with-nth='3..' \
-      --disabled \
-      --prompt='herdr | ' \
+      --no-input \
+      --prompt='search > ' \
       --header='[j/k] move  [/] search  [enter] focus  [a] agents  [s] all  [r] reload  [p] preview  [q] quit' \
       --info=inline \
       --layout=reverse \
@@ -355,14 +472,14 @@ cmd_ui() {
       --bind="G:last" \
       --bind="q:abort" \
       --bind="p:toggle-preview" \
-      --bind="/:enable-search+change-prompt(search > )+$normal_binds+rebind(esc)" \
-      --bind="esc:disable-search+clear-query+change-prompt(herdr | )+$vim_binds+unbind(esc)" \
+      --bind="/:$enter_search" \
+      --bind="esc:$enter_normal" \
       --bind="ctrl-/:toggle-preview" \
-      --bind="a:change-prompt(agents | )+reload($self list-agents)" \
-      --bind="s:change-prompt(herdr | )+reload($self list)" \
+      --bind="a:reload($self list-agents)" \
+      --bind="s:reload($self list)" \
       --bind="r:reload($self list)" \
-      --bind="ctrl-a:change-prompt(agents | )+reload($self list-agents)" \
-      --bind="ctrl-s:change-prompt(herdr | )+reload($self list)" \
+      --bind="ctrl-a:reload($self list-agents)" \
+      --bind="ctrl-s:reload($self list)" \
       --bind="ctrl-r:reload($self list)"
   )" || exit 0
 
