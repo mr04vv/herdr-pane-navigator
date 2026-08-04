@@ -59,6 +59,14 @@ collect_rows() {
     def branch(is_last): if is_last then "└─ " else "├─ " end;
     def spine(is_last):  if is_last then "   "  else "│  " end;
 
+    # Display title for a pane. The terminal title is usually right, but agents
+    # that never set one leave something useless there -- Codex prints the raw
+    # session UUID -- so a summary reported into pane metadata (the codex-title
+    # Stop hook fills tokens.codex_title) takes precedence when present.
+    def pane_title:
+      ((.tokens.codex_title? // .terminal_title_stripped // "")
+       | gsub("^\\s+|\\s+$"; ""));
+
     ($panes.result.panes // []) as $all_panes
     | ($tabs.result.tabs // []) as $all_tabs
 
@@ -106,9 +114,9 @@ collect_rows() {
             # the meta column so the tab is still identifiable.
             ( [ $all_panes[]
                 | select(.tab_id == $t.tab_id)
-                | select(((.terminal_title_stripped // "") | gsub("^\\s+|\\s+$"; "")) != "")
+                | select(pane_title != "")
                 | { rank: (if (.agent_status // "unknown") != "unknown" then 0 else 1 end),
-                    title: (.terminal_title_stripped | gsub("^\\s+|\\s+$"; "")) } ]
+                    title: pane_title } ]
               | sort_by(.rank) | first | .title // "" ) as $borrowed
             | (if ($t.label | test("^[0-9]+$")) and $borrowed != ""
                then $borrowed else $t.label end) as $tab_label
@@ -129,7 +137,7 @@ collect_rows() {
             | to_entries[]
             | (.key == ($sorted_panes | length - 1)) as $pane_last
             | .value.p as $p
-            | (($p.terminal_title_stripped // "") | gsub("^\\s+|\\s+$"; "")) as $title
+            | ($p | pane_title) as $title
             | [ "pane", $p.pane_id, ($p.agent_status // "unknown"),
                 (spine($tab_last) + branch($pane_last)),
                 (if $title == "" then (($p.cwd // "/") | split("/") | last) else $title end),

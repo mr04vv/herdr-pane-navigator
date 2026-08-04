@@ -1,6 +1,6 @@
 id = "pane-navigator"
 name = "Pane Navigator"
-version = "0.1.0"
+version = "0.1.1"
 min_herdr_version = "0.7.3"
 description = "Navigate workspaces, tabs, and panes as one tree, led by each pane's title."
 platforms = ["linux", "macos"]
