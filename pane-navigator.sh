@@ -67,7 +67,12 @@ collect_rows() {
       ((.tokens.codex_title? // .terminal_title_stripped // "")
        | gsub("^\\s+|\\s+$"; ""));
 
-    ($panes.result.panes // []) as $all_panes
+    # Drop the navigator'\''s own pane. When prefix+p opens this over a tab, herdr
+    # lists the overlay pane too -- so the picker would show a "Pane Navigator"
+    # row pointing back at itself. It is identified by its label, which herdr
+    # sets from the plugin manifest.
+    ( ($panes.result.panes // [])
+      | map(select(.label != "Pane Navigator")) ) as $all_panes
     | ($tabs.result.tabs // []) as $all_tabs
 
     # Only panes carry a real status; tabs and workspaces borrow the minimum
@@ -287,7 +292,11 @@ cmd_preview() {
   local kind="${1:-}" id="${2:-}"
   case "$kind" in
     spacer) : ;;
-    pane)   herdr pane read "$id" --lines 40 2>/dev/null || echo '(no output)' ;;
+    # --source visible, not the default recent: recent returns only what has
+    # newly scrolled by, so an idle shell pane reads back empty. visible is
+    # whatever is on screen right now, which an idle pane still has, and an
+    # active agent pane renders the same either way.
+    pane)   herdr pane read "$id" --source visible --lines 40 2>/dev/null || echo '(no output)' ;;
     tab)    herdr tab get "$id" 2>/dev/null | jq . 2>/dev/null || echo '(no detail)' ;;
     *)      herdr workspace get "$id" 2>/dev/null | jq . 2>/dev/null || echo '(no detail)' ;;
   esac

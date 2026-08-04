@@ -73,7 +73,7 @@ preferring an agent pane, and keeps its number in the right-hand column as `#1`.
 
 ## Preview
 
-`p` shows the pane's recent output — the exact permission prompt a `blocked`
+`p` shows the pane's on-screen output — the exact permission prompt a `blocked`
 agent is stuck on, for instance — so you can decide before jumping. `r` refreshes
 everything.
 
