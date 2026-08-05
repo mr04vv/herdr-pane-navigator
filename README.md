@@ -1,6 +1,6 @@
 # herdr-pane-navigator
 
-<img width="1100" height="380" alt="demo" src="https://github.com/user-attachments/assets/485478ec-2411-4c4a-9e32-9bb0872bab4b" />
+![](./docs/assets/demo2.gif)
 
 
 One fuzzy tree over every workspace, tab, and pane in [herdr](https://herdr.dev),
