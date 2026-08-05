@@ -433,20 +433,43 @@ cmd_ui() {
   local self selection kind id
   self="$(printf '%q' "$SELF")"
 
-  # Modal, vim style. The navigator starts in normal mode with --no-input, which
-  # hides the input line entirely -- so there is no caret blinking in normal mode
-  # and an unbound printable key (d, x, 1, ...) has nowhere to land instead of
-  # silently entering a hidden query. "/" reveals the input with show-input to
-  # search; esc hides it again and drops back to normal mode.
+  # Cursor style marks the mode, editor-style. fzf never emits a DECSCUSR
+  # sequence of its own, so a style set here (or via the mode binds below)
+  # persists until changed: steady block in normal mode so the caret does not
+  # blink when it is not an input, blinking block in search mode to signal "you
+  # are typing now". Restored to the terminal default on the way out, including
+  # on ctrl-c, via the trap.
+  printf '\033[2 q'
+  trap 'printf "\033[0 q"' EXIT
+
+  # Modal, vim style. Normal mode is the default: --disabled turns off filtering
+  # so j/k/g/G move the cursor, and "/" switches to search. Leaving search with
+  # esc drops back to normal mode instead of quitting, so esc only exits search.
+  #
+  # --disabled turns off *filtering*, not typing: an unbound printable key still
+  # lands in the query. So normal mode binds `change` to clear-query -- a stray
+  # character is wiped the instant it is typed, keeping normal mode from quietly
+  # accumulating a hidden query. Search mode unbinds `change` so the query grows,
+  # and the caret (steady, set above) marks where the text goes.
+  #
+  # Leaving search with esc keeps the query and the filtered result -- it does
+  # NOT disable-search or clear-query -- so the text you typed stays visible and
+  # the list stays narrowed after you drop back to moving with j/k. The query is
+  # only wiped when you actually type a stray key in normal mode (change fires
+  # clear-query again), which is the deliberate way to clear a search.
   #
   # Every single-letter binding has to be released while searching or it would be
   # swallowed instead of reaching the query; leaving search rebinds them all. esc
   # is the inverse -- live only while searching -- so normal mode exits on q.
   #
   # enter_search runs when "/" switches into search mode; enter_normal when esc
-  # returns. (Named for the mode they enter, not the keys they map.)
-  local enter_search='show-input+unbind(j,k,g,G,/,q,a,s,r,p)+rebind(esc)'
-  local enter_normal='hide-input+rebind(j,k,g,G,/,q,a,s,r,p)+clear-query+unbind(esc)'
+  # returns. (Named for the mode they enter, not the keys they map.) Each also
+  # sets the caret: blinking block (1 q) while typing, steady block (2 q) back
+  # in normal mode. The escape must go to /dev/tty -- execute-silent discards a
+  # command's stdout, so writing to the controlling terminal directly is the only
+  # way the DECSCUSR sequence actually reaches the screen.
+  local enter_search='enable-search+change-prompt(search > )+unbind(j,k,g,G,/,q,a,s,r,p)+unbind(change)+rebind(esc)+execute-silent(printf "\033[1 q" > /dev/tty)'
+  local enter_normal='change-prompt(herdr | )+rebind(j,k,g,G,/,q,a,s,r,p)+rebind(change)+unbind(esc)+execute-silent(printf "\033[2 q" > /dev/tty)'
 
   # --with-nth=3.. hides the dispatch prefix while leaving it in the output.
   # ctrl-a swaps the source to agents only and ctrl-s swaps it back, which is
@@ -456,8 +479,8 @@ cmd_ui() {
       --ansi \
       --delimiter="$SEP" \
       --with-nth='3..' \
-      --no-input \
-      --prompt='search > ' \
+      --disabled \
+      --prompt='herdr | ' \
       --header='[j/k] move  [/] search  [enter] focus  [a] agents  [s] all  [r] reload  [p] preview  [q] quit' \
       --info=inline \
       --layout=reverse \
@@ -466,6 +489,7 @@ cmd_ui() {
       --preview="$self preview {1} {2}" \
       --preview-window='right,50%,border-left,wrap,hidden' \
       --bind="start:unbind(esc)" \
+      --bind="change:clear-query" \
       --bind="j:down" \
       --bind="k:up" \
       --bind="g:first" \
@@ -475,11 +499,11 @@ cmd_ui() {
       --bind="/:$enter_search" \
       --bind="esc:$enter_normal" \
       --bind="ctrl-/:toggle-preview" \
-      --bind="a:reload($self list-agents)" \
-      --bind="s:reload($self list)" \
+      --bind="a:change-prompt(agents | )+reload($self list-agents)" \
+      --bind="s:change-prompt(herdr | )+reload($self list)" \
       --bind="r:reload($self list)" \
-      --bind="ctrl-a:reload($self list-agents)" \
-      --bind="ctrl-s:reload($self list)" \
+      --bind="ctrl-a:change-prompt(agents | )+reload($self list-agents)" \
+      --bind="ctrl-s:change-prompt(herdr | )+reload($self list)" \
       --bind="ctrl-r:reload($self list)"
   )" || exit 0
 

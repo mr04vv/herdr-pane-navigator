@@ -47,9 +47,11 @@ and `herdr server reload-config`.
 
 ## Keys
 
-The navigator opens in normal mode with the input line hidden, so single letters
-are commands rather than query text — and there is no stray caret. `/` reveals
-the input to search; `esc` hides it again.
+The navigator opens in normal mode, so single letters are commands rather than
+query text — a stray key is discarded instead of filtering. `/` switches to
+search; `esc` leaves it but keeps the query and the filtered result, so what you
+typed stays on screen while you move with `j`/`k`. The caret marks the mode:
+steady in normal, blinking while you search.
 
 | Key | Action |
 | --- | --- |
