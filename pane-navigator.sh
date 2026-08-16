@@ -238,17 +238,112 @@ for line in sys.stdin:
 '
 }
 
+# Replace the meta column of every blocked pane with the question it is waiting
+# on, so the list answers "what is it asking?" without opening a preview.
+#
+# This reads each blocked pane's screen, so it costs one `pane read` per blocked
+# pane -- bounded by how many agents are actually stuck, which is normally one or
+# two. Panes in any other state are passed through untouched and cost nothing.
+#
+# Rows are split with awk rather than `read`, because `read -r` with IFS set to
+# tab treats runs of tabs as one separator -- and the agent view deliberately
+# empties the prefix field, so an adjacent-tab pair there would silently shift
+# every later column left.
+annotate_blocked() {
+  local line kind id state reason
+  while IFS= read -r line; do
+    kind="${line%%"$SEP"*}"
+    if [ "$kind" = pane ]; then
+      id="$(printf '%s' "$line" | awk -F'\t' '{print $2}')"
+      state="$(printf '%s' "$line" | awk -F'\t' '{print $3}')"
+      if [ "$state" = blocked ]; then
+        reason="$(herdr pane read "$id" --source visible --lines 40 2>/dev/null | blocked_reason)"
+        if [ -n "$reason" ]; then
+          line="$(printf '%s' "$line" |
+            awk -F'\t' -v r="waiting: $reason" 'BEGIN { OFS = FS } { $6 = r; print }')"
+        fi
+      fi
+    fi
+    printf '%s\n' "$line"
+  done
+}
+
 cmd_list() {
-  collect_rows | format_rows
+  collect_rows | annotate_blocked | format_rows
 }
 
 # Agent-only view, for the toggle bound below. Panes without a detected agent
 # carry an empty meta field, which is what distinguishes them here; the tree
 # prefixes are dropped since a flat list has no parents to connect to.
+#
+# The agent filter runs before annotate_blocked, because it keys off that same
+# meta column -- annotating first would rewrite it on exactly the blocked rows
+# this view most needs to keep.
 cmd_list_agents() {
   collect_rows \
     | awk -F'\t' 'BEGIN { OFS = FS } $1 == "pane" && $6 != "" { $4 = ""; print }' \
+    | annotate_blocked \
     | format_rows
+}
+
+# Close the given panes, then reload. Bound to a two-step x/y in the UI, because
+# closing a pane kills whatever is running in it and there is no undo.
+cmd_close() {
+  local id
+  for id in "$@"; do
+    [ -n "$id" ] || continue
+    herdr pane close "$id" >/dev/null 2>&1 || true
+  done
+}
+
+# Answer a blocked agent in place, without focusing away from the navigator.
+#
+# The whole point of the blocked-first ordering is triage: with three agents
+# waiting on a permission prompt, jumping to each one to press a single key
+# costs more than the decision does. send-keys puts the answer straight into the
+# pane and the caller reloads, so the queue drains from one screen.
+cmd_reply() {
+  local key="${1:-}" id
+  [ -n "$key" ] || die 'reply requires <key> <pane_id>...'
+  shift
+  for id in "$@"; do
+    [ -n "$id" ] || continue
+    herdr pane send-keys "$id" "$key" >/dev/null 2>&1 || true
+  done
+}
+
+# `y` and `n` mean different things depending on whether `x` armed a close, and
+# fzf resolves that by running a `transform` binding: whatever these print is
+# executed as the action list for the key just pressed.
+#
+# They are subcommands rather than inline shell in the --bind string because the
+# branch needs a real if, and fzf's action grammar has no conditional.
+cmd_on_yes() {
+  local armed="${1:-}"
+  shift
+  if [ -e "$armed" ]; then
+    rm -f "$armed"
+    cmd_close "$@"
+    printf 'change-prompt(herdr | )+reload(%s list)' "$SELF"
+  else
+    # Not armed: `y` answers the agent in the selected pane(s).
+    cmd_reply y "$@"
+    printf 'reload(%s list)' "$SELF"
+  fi
+}
+
+cmd_on_no() {
+  local armed="${1:-}"
+  shift
+  if [ -e "$armed" ]; then
+    # Cancelling a close must not also send "n" to the agent -- that would turn
+    # an aborted close into an unintended answer.
+    rm -f "$armed"
+    printf 'change-prompt(herdr | )'
+  else
+    cmd_reply n "$@"
+    printf 'reload(%s list)' "$SELF"
+  fi
 }
 
 # Dispatch a chosen row. Exposed as a subcommand so fzf can call back into this
@@ -285,6 +380,51 @@ api_call() {
   printf '{"id":"pane-navigator","method":"%s","params":%s}\n' "$method" "$params" |
     nc -U "$socket" 2>/dev/null |
     head -1
+}
+
+# Extract the question a blocked agent is waiting on, from its visible screen on
+# stdin. Empty output means "no pending question", which is the common case and
+# has to stay quiet -- a wrong reason on every working pane is worse than none.
+#
+# Agents draw the prompt in a box a few lines above the bottom, then keep
+# painting a status line underneath it, so the last line is never the question.
+# The scan therefore runs bottom-up over the whole screen and takes the first
+# line that reads like a decision being asked for.
+blocked_reason() {
+  python3 -c '
+import re, sys
+
+# Strip ANSI, then box-drawing glyphs and the bullets agents use for options, so
+# a question framed in a border compares the same as a bare one.
+ANSI = re.compile(r"\033\[[0-9;?]*[a-zA-Z]")
+# U+2500-U+257F is the box-drawing block; the rest are the bullets and carets
+# agents prefix lines with.
+EDGE = re.compile(r"^[\s─-╿•❯⎿⏺⤷>]+|[\s─-╿]+$")
+
+# A pending decision, in the two shapes agents actually use: an explicit
+# yes/no marker, or a "Do you want ... ?" / "Allow ... ?" sentence.
+PROMPT = re.compile(
+    r"\((?:y/n|Y/n|y/N)\)|\[(?:y/n|Y/n|y/N)\]"
+    r"|^(?:Do you want|Would you like|Allow|Approve|Proceed|Continue)\b.*\?",
+    re.IGNORECASE,
+)
+
+# Lines that contain a question mark but are not a prompt: an agent recap, a
+# numbered option under a prompt, or the status line itself.
+NOISE = re.compile(r"^(?:recap|※|\d+\.|Context:|Session:|Weekly:)|disable recaps")
+
+best = ""
+for raw in sys.stdin.read().splitlines():
+    line = EDGE.sub("", ANSI.sub("", raw)).strip()
+    if not line or NOISE.search(line):
+        continue
+    if PROMPT.search(line):
+        # Bottom-up: keep overwriting, so the last match in file order -- the
+        # lowest on screen, i.e. the most recent prompt -- is what survives.
+        best = line
+
+sys.stdout.write(best)
+'
 }
 
 # Colors for preview, matching the icon palette in format_rows so the list and
@@ -357,6 +497,13 @@ cmd_preview() {
         # or its terminal title is just the cwd -- already in the header, so drop
         # it rather than print the path twice.
         [ "$title" = "$cwd" ] && title=""
+        # For a blocked pane the pending question beats the conversation title:
+        # it is the reason you are looking at this pane at all.
+        if [ "$status" = blocked ]; then
+          local reason
+          reason="$(herdr pane read "$id" --source visible --lines 40 2>/dev/null | blocked_reason)"
+          [ -n "$reason" ] && title="$reason"
+        fi
         preview_header "$status" "$kind_label · $status · $cwd" "$title"
       fi
       # --format ansi keeps the pane's own colors; --source visible so an idle
@@ -440,7 +587,6 @@ cmd_ui() {
   # are typing now". Restored to the terminal default on the way out, including
   # on ctrl-c, via the trap.
   printf '\033[2 q'
-  trap 'printf "\033[0 q"' EXIT
 
   # Modal, vim style. Normal mode is the default: --disabled turns off filtering
   # so j/k/g/G move the cursor, and "/" switches to search. Leaving search with
@@ -468,8 +614,22 @@ cmd_ui() {
   # in normal mode. The escape must go to /dev/tty -- execute-silent discards a
   # command's stdout, so writing to the controlling terminal directly is the only
   # way the DECSCUSR sequence actually reaches the screen.
-  local enter_search='enable-search+change-prompt(search > )+unbind(j,k,g,G,/,q,a,s,r,p)+unbind(change)+rebind(esc)+execute-silent(printf "\033[1 q" > /dev/tty)'
-  local enter_normal='change-prompt(herdr | )+rebind(j,k,g,G,/,q,a,s,r,p)+rebind(change)+unbind(esc)+execute-silent(printf "\033[2 q" > /dev/tty)'
+  local mode_keys='j,k,g,G,/,q,a,s,r,p,x,y,n'
+  local enter_search="enable-search+change-prompt(search > )+unbind($mode_keys)+unbind(change)+rebind(esc)+execute-silent(printf \"\\033[1 q\" > /dev/tty)"
+  local enter_normal="change-prompt(herdr | )+rebind($mode_keys)+rebind(change)+unbind(esc)+execute-silent(printf \"\\033[2 q\" > /dev/tty)"
+
+  # Two-step close. `x` only arms it, by writing a flag file and repainting the
+  # prompt as a question; `y`/`n` then mean "confirm/cancel the close" instead of
+  # their normal "answer the agent". The destructive key is never the one you
+  # land on by accident, and the flag is the state, so both keys stay bound.
+  #
+  # The flag lives in a per-invocation temp dir rather than a shell variable
+  # because fzf runs every binding in its own subshell -- nothing set inside one
+  # binding survives into the next.
+  local statedir
+  statedir="$(mktemp -d "${TMPDIR:-/tmp}/pane-navigator.XXXXXX")"
+  trap 'printf "\033[0 q"; rm -rf "$statedir"' EXIT
+  local armed="$statedir/armed"
 
   # --with-nth=3.. hides the dispatch prefix while leaving it in the output.
   # ctrl-a swaps the source to agents only and ctrl-s swaps it back, which is
@@ -481,7 +641,8 @@ cmd_ui() {
       --with-nth='3..' \
       --disabled \
       --prompt='herdr | ' \
-      --header='[j/k] move  [/] search  [enter] focus  [a] agents  [s] all  [r] reload  [p] preview  [q] quit' \
+      --multi \
+      --header='[j/k] move  [/] search  [enter] focus  [tab] select  [y/n] reply  [x] close  [a] agents  [s] all  [r] reload  [p] preview  [q] quit' \
       --info=inline \
       --layout=reverse \
       --border=rounded \
@@ -499,6 +660,11 @@ cmd_ui() {
       --bind="/:$enter_search" \
       --bind="esc:$enter_normal" \
       --bind="ctrl-/:toggle-preview" \
+      --bind="ctrl-u:preview-page-up" \
+      --bind="ctrl-d:preview-page-down" \
+      --bind="x:execute-silent(touch $armed)+change-prompt(close selected? [y/n] )" \
+      --bind="y:transform:$self on-yes $armed {+2}" \
+      --bind="n:transform:$self on-no $armed {+2}" \
       --bind="a:change-prompt(agents | )+reload($self list-agents)" \
       --bind="s:change-prompt(herdr | )+reload($self list)" \
       --bind="r:reload($self list)" \
@@ -509,6 +675,9 @@ cmd_ui() {
 
   [ -n "$selection" ] || exit 0
 
+  # With a multi selection fzf prints every marked row; focus takes the first,
+  # since focusing several places at once has no meaning. Multi-select exists
+  # for the bulk actions (close, reply), which do consume the whole set.
   IFS="$SEP" read -r kind id _ <<<"$selection"
 
   # Focus first, then close this pane.
@@ -538,8 +707,13 @@ main() {
     list-agents) cmd_list_agents ;;
     preview)     shift; cmd_preview "$@" ;;
     focus)       shift; cmd_focus "$@" ;;
+    reply)       shift; cmd_reply "$@" ;;
+    close)       shift; cmd_close "$@" ;;
+    on-yes)      shift; cmd_on_yes "$@" ;;
+    on-no)       shift; cmd_on_no "$@" ;;
     *)           die "unknown subcommand: ${1:-}" ;;
   esac
 }
 
-main "$@"
+# Sourced by the self-check to reach the pure functions without running the UI.
+[ -n "${NAV_SOURCED_FOR_TEST:-}" ] || main "$@"
