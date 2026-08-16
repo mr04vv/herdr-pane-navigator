@@ -147,5 +147,31 @@ check_row 'workspace row untouched' \
   "$(printf 'workspace\tw9\tblocked\t\tmy project\t2 tabs, 3 panes')" \
   "$(printf 'workspace\tw9\tblocked\t\tmy project\t2 tabs, 3 panes')"
 
+# --- pane id unquoting -----------------------------------------------------
+#
+# fzf single-quotes every placeholder expansion, so a `{+2}` in a transform
+# binding arrives as 'wZ:p1' 'wZ:p2' -- quotes included, as literal characters.
+# Passing those straight to `herdr pane send-keys` fails with pane_not_found,
+# which is exactly how y/n silently did nothing.
+
+check_ids() {
+  local name="$1" want="$2"
+  shift 2
+  local got
+  got="$(unquote_ids "$@")"
+  if [ "$got" = "$want" ]; then
+    pass=$((pass + 1))
+  else
+    fail=$((fail + 1))
+    printf 'FAIL %s\n  want: %q\n  got:  %q\n' "$name" "$want" "$got"
+  fi
+}
+
+check_ids 'strips the quotes fzf adds' 'wZ:p1' "'wZ:p1'"
+check_ids 'multi selection' 'wZ:p1 wZ:p2' "'wZ:p1'" "'wZ:p2'"
+check_ids 'bare ids pass through' 'wZ:p1 wZ:p2' 'wZ:p1' 'wZ:p2'
+check_ids 'empty args drop out' 'wZ:p1' '' "'wZ:p1'" ''
+check_ids 'nothing selected' '' ''
+
 printf '%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

@@ -18,6 +18,12 @@ readonly SELF
 # from workspace/tab names and terminal titles, none of which can contain one.
 readonly SEP=$'\t'
 
+# Where the actions bound inside fzf report failures. While fzf owns the screen
+# neither stdout nor stderr is visible -- stdout is consumed as the action list
+# of a transform binding -- so a broken send-keys would otherwise fail silently.
+LOG="${TMPDIR:-/tmp}/pane-navigator.log"
+readonly LOG
+
 die() {
   printf 'pane-navigator: %s\n' "$*" >&2
   exit 1
@@ -286,13 +292,34 @@ cmd_list_agents() {
     | format_rows
 }
 
+# Strip the quotes fzf wraps around placeholder expansions.
+#
+# A `{+2}` in a transform binding does not arrive as bare words: fzf quotes each
+# one, so two selected rows come through as the four characters 'wZ:p1' plus
+# 'wZ:p2'. Handing that to `herdr pane send-keys` fails with pane_not_found,
+# because the quotes are part of the id as far as the CLI is concerned.
+#
+# Emits the cleaned ids space separated, dropping empties, for the caller to
+# word-split. Pane ids are `w<n>:p<n>`, so splitting on whitespace is safe.
+unquote_ids() {
+  local id out=""
+  for id in "$@"; do
+    id="${id#\'}"
+    id="${id%\'}"
+    [ -n "$id" ] || continue
+    out="${out:+$out }$id"
+  done
+  printf '%s' "$out"
+}
+
 # Close the given panes, then reload. Bound to a two-step x/y in the UI, because
 # closing a pane kills whatever is running in it and there is no undo.
 cmd_close() {
-  local id
-  for id in "$@"; do
-    [ -n "$id" ] || continue
-    herdr pane close "$id" >/dev/null 2>&1 || true
+  local id err
+  for id in $(unquote_ids "$@"); do
+    if ! err="$(herdr pane close "$id" 2>&1)"; then
+      printf 'pane-navigator: close %s: %s\n' "$id" "$err" >>"$LOG"
+    fi
   done
 }
 
@@ -302,13 +329,20 @@ cmd_close() {
 # waiting on a permission prompt, jumping to each one to press a single key
 # costs more than the decision does. send-keys puts the answer straight into the
 # pane and the caller reloads, so the queue drains from one screen.
+#
+# Failures are logged rather than discarded. An earlier version sent the key
+# with `|| true`, so when the pane id arrived still wrapped in fzf's quotes the
+# CLI's pane_not_found went nowhere and the keys simply stopped working with no
+# sign of why. The log is the only channel available -- stdout belongs to the
+# transform action, and stderr is not drawn while fzf owns the screen.
 cmd_reply() {
-  local key="${1:-}" id
+  local key="${1:-}" id err
   [ -n "$key" ] || die 'reply requires <key> <pane_id>...'
   shift
-  for id in "$@"; do
-    [ -n "$id" ] || continue
-    herdr pane send-keys "$id" "$key" >/dev/null 2>&1 || true
+  for id in $(unquote_ids "$@"); do
+    if ! err="$(herdr pane send-keys "$id" "$key" 2>&1)"; then
+      printf 'pane-navigator: send-keys %s %s: %s\n' "$id" "$key" "$err" >>"$LOG"
+    fi
   done
 }
 

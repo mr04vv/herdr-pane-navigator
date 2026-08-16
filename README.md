@@ -94,6 +94,11 @@ the agent.
 
 With rows marked via `tab`, the close covers the whole selection.
 
+If `y`, `n`, or a close ever appears to do nothing, look in
+`$TMPDIR/pane-navigator.log`. While fzf owns the screen these actions have
+nowhere to print — stdout is consumed as fzf's action list — so failures are
+written there instead of being lost.
+
 ## Tab titles
 
 An unnamed tab is just `1`, `2`, … in herdr, which says nothing about what is in
