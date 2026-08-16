@@ -58,6 +58,10 @@ steady in normal, blinking while you search.
 | `j` / `k` | move down / up |
 | `g` / `G` | first / last |
 | `enter` | focus the selected workspace, tab, or pane |
+| `tab` | add the row to the selection |
+| `y` / `n` | answer a blocked agent without leaving the navigator |
+| `x` then `y` | close the selected pane(s) |
+| `ctrl-u` / `ctrl-d` | scroll the preview |
 | `/` | search |
 | `esc` | leave search, back to normal mode |
 | `a` / `s` | agents only / everything |
@@ -67,6 +71,28 @@ steady in normal, blinking while you search.
 
 `ctrl-a`, `ctrl-s`, `ctrl-r`, and `ctrl-/` do the same as their unprefixed
 counterparts and keep working while you type a search.
+
+## Answering without leaving
+
+When several agents are waiting on a permission prompt at once, walking to each
+pane to press one key costs more than the decision does. `y` and `n` send that
+key straight to the selected pane and reload, so a queue of blocked agents
+drains from the list.
+
+Mark several rows with `tab` first and the answer goes to all of them — useful
+when three agents are stuck on the same kind of prompt. What each one is asking
+is already on its row (see below), so the batch is not a blind one.
+
+## Closing panes
+
+`x` arms a close and repaints the prompt as `close selected? [y/n]`; `y`
+confirms, `n` backs out. It is two steps because closing a pane kills whatever
+is running in it and herdr has no undo — and because `y` otherwise means
+"answer the agent", which is not a keypress to overload with a destructive
+action. Cancelling with `n` only cancels; it does not fall through and answer
+the agent.
+
+With rows marked via `tab`, the close covers the whole selection.
 
 ## Tab titles
 
@@ -81,11 +107,30 @@ colors as the list:
 
 - **A pane** shows a header (agent · status · cwd, plus the conversation title)
   above its live on-screen output — in the pane's own colors — so you see the
-  exact permission prompt a `blocked` agent is stuck on before jumping.
+  exact permission prompt a `blocked` agent is stuck on before jumping. For a
+  blocked pane the header's second line is the pending question itself, in place
+  of the conversation title.
 - **A tab** shows the panes inside it, each with its status and title.
 - **A workspace** shows its tabs, with the panes nested under each.
 
-`r` refreshes everything.
+`r` refreshes everything, and `ctrl-u` / `ctrl-d` scroll the preview when the
+output runs past one screen.
+
+## What a blocked agent is asking
+
+A `blocked` row does not just say `blocked` — its right-hand column carries the
+question the agent is waiting on, so the list answers "what does it want?"
+without opening anything:
+
+```
+PN  !  └─ fix the parser        waiting: Do you want to make this edit to config.toml?
+```
+
+The question is read off the pane's own screen, skipping the status line agents
+paint underneath it. Only blocked panes are read, so the cost scales with how
+many agents are actually stuck rather than with the size of the tree. When
+nothing question-shaped is on screen the column falls back to the agent name —
+a wrong reason would be worse than none.
 
 ## Status icons
 
