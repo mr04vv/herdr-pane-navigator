@@ -482,9 +482,14 @@ status_dot() {
 # cwd shortened to ~ for readability in a header.
 short_cwd() { printf '%s' "${1/#$HOME/\~}"; }
 
-# A full-width rule under the header. 60 cells is a touch under the 50%%-wide
-# preview pane at typical widths, and wrap handles the rest.
-rule() { printf '%s%s%s\n' "$C_DIM" "────────────────────────────────────────────────────────────" "$C_RESET"; }
+# A rule under the header, spanning the preview. fzf exports the window width to
+# the command it runs, so this tracks a resize; 60 is only the fallback for
+# running the preview outside fzf.
+rule() {
+  local w="${FZF_PREVIEW_COLUMNS:-60}" i line=""
+  for ((i = 0; i < w; i++)); do line+="─"; done
+  printf '%s%s%s\n' "$C_DIM" "$line" "$C_RESET"
+}
 
 # One "<dot> <agent/shell> <status> <title|cwd>" line for a pane, used by the
 # tab/workspace previews to list what lives inside.
@@ -635,16 +640,28 @@ for y in range(H):
 '
 }
 
-# Preview box for the tab layout, in cells. The preview pane is 50% of the
-# terminal; 56x20 fits a typical split without the drawing dominating the
-# header above it.
-readonly LAYOUT_W=56
-readonly LAYOUT_H=20
+# Rows the preview spends on its own header before the drawing starts: the
+# summary line and the rule under it.
+readonly LAYOUT_HEADER_ROWS=2
+
+# Size of the tab drawing, in cells. fzf exports the real preview dimensions to
+# the command it runs, so the layout fills whatever the window actually is
+# rather than a guess -- resizing the terminal resizes the drawing. The
+# fallbacks only apply when the preview is invoked outside fzf, as in a test.
+layout_box() {
+  local w="${FZF_PREVIEW_COLUMNS:-56}" h="${FZF_PREVIEW_LINES:-20}"
+  # Leave the header its rows, and never return a box too small to draw.
+  h=$((h - LAYOUT_HEADER_ROWS))
+  [ "$w" -lt 12 ] && w=12
+  [ "$h" -lt 6 ] && h=6
+  printf '%s %s' "$w" "$h"
+}
 
 # Feed render_layout the geometry and contents of one tab. Fails (non-zero) when
 # herdr reports no usable layout, so the caller can fall back.
 tab_layout() {
-  local tab_id="$1" panes_json first layout body
+  local tab_id="$1" panes_json first layout body lw lh
+  read -r lw lh < <(layout_box)
 
   panes_json="$(herdr pane list 2>/dev/null)" || return 1
   first="$(printf '%s' "$panes_json" |
@@ -661,7 +678,7 @@ tab_layout() {
   # than the real screen, and the pane borders carry the status color already.
   body="$(
     printf '%s' "$layout" | jq -c '.panes[].pane_id' -r | while IFS= read -r pid; do
-      herdr pane read "$pid" --source visible --lines "$LAYOUT_H" 2>/dev/null |
+      herdr pane read "$pid" --source visible --lines "$lh" 2>/dev/null |
         jq -Rs --arg id "$pid" '{pane_id: $id, lines: (. / "\n")}'
     done | jq -sc '.'
   )"
@@ -670,7 +687,7 @@ tab_layout() {
     --argjson layout "$layout" \
     --argjson panes "$panes_json" \
     --argjson body "${body:-[]}" \
-    --argjson w "$LAYOUT_W" --argjson h "$LAYOUT_H" '
+    --argjson w "$lw" --argjson h "$lh" '
     ($body | map({key: .pane_id, value: .lines}) | from_entries) as $lines
     | ($panes.result.panes // [] | map({key: .pane_id, value: .}) | from_entries) as $meta
     | {
