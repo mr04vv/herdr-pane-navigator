@@ -173,5 +173,76 @@ check_ids 'bare ids pass through' 'wZ:p1 wZ:p2' 'wZ:p1' 'wZ:p2'
 check_ids 'empty args drop out' 'wZ:p1' '' "'wZ:p1'" ''
 check_ids 'nothing selected' '' ''
 
+# --- render_layout ---------------------------------------------------------
+#
+# The tab preview reproduces the arrangement you would see on screen, so what
+# matters is geometry: the drawing must land inside the requested box, and panes
+# that sit side by side on the real screen must sit side by side here.
+
+plain() { sed $'s/\033\\[[0-9;]*m//g'; }
+
+# Widest row in terminal cells. awk counts characters, which is the wrong unit
+# here -- a CJK title fits half as many glyphs into the same box.
+widest() {
+  plain | python3 -c '
+import sys, unicodedata
+print(max((sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in l.rstrip("\n"))
+           for l in sys.stdin), default=0))'
+}
+
+# The real shape herdr reports for a tab split down, then the lower half split
+# right: one full-width pane on top, two beneath it.
+NESTED='{"width":40,"height":12,
+ "area":{"x":35,"y":1,"width":202,"height":114},
+ "panes":[
+  {"pane_id":"p1","rect":{"x":35,"y":1,"width":202,"height":57},"status":"idle","title":"top","lines":["alpha"]},
+  {"pane_id":"p2","rect":{"x":35,"y":58,"width":101,"height":57},"status":"working","title":"left","lines":["beta"]},
+  {"pane_id":"p3","rect":{"x":136,"y":58,"width":101,"height":57},"status":"blocked","title":"right","lines":["gamma"]}
+ ]}'
+
+out="$(printf '%s' "$NESTED" | render_layout | plain)"
+
+check_render() {
+  local name="$1" cond="$2"
+  if eval "$cond"; then
+    pass=$((pass + 1))
+  else
+    fail=$((fail + 1))
+    printf 'FAIL %s\n%s\n' "$name" "$out"
+  fi
+}
+
+check_render 'never exceeds the requested width' \
+  '[ "$(printf "%s\n" "$out" | widest)" -le 40 ]'
+
+check_render 'never exceeds the requested height' \
+  '[ "$(printf "%s\n" "$out" | wc -l | tr -d " ")" -le 12 ]'
+
+# Side-by-side panes must share rows: the row holding one title holds the other.
+check_render 'split-right panes share a row' \
+  'printf "%s" "$out" | grep -q "left.*right"'
+
+# The top pane spans the full width, so its title row must not also carry a
+# sibling -- that would mean the vertical split was flattened.
+check_render 'full-width pane owns its row' \
+  '! (printf "%s" "$out" | grep -q "top.*left")'
+
+check_render 'each pane contributes its content' \
+  'printf "%s" "$out" | grep -q alpha && printf "%s" "$out" | grep -q beta && printf "%s" "$out" | grep -q gamma'
+
+# A pane scaled below a drawable size is skipped rather than drawn as debris.
+TINY='{"width":40,"height":12,"area":{"x":0,"y":0,"width":2000,"height":1140},
+ "panes":[{"pane_id":"p1","rect":{"x":0,"y":0,"width":8,"height":8},"status":"idle","title":"x","lines":["y"]}]}'
+check_render 'a pane too small to draw is dropped' \
+  '[ -z "$(printf "%s" "$TINY" | render_layout | plain | tr -d " \n")" ]'
+
+# Full-width CJK must not push the border past the box -- the whole reason the
+# renderer measures in cells rather than characters.
+CJK='{"width":30,"height":6,"area":{"x":0,"y":0,"width":100,"height":50},
+ "panes":[{"pane_id":"p1","rect":{"x":0,"y":0,"width":100,"height":50},"status":"idle",
+   "title":"日本語のタイトルがとても長い場合","lines":["日本語の本文がここに入ります"]}]}'
+check_render 'CJK stays inside the box' \
+  '[ "$(printf "%s" "$CJK" | render_layout | widest)" -le 30 ]'
+
 printf '%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

@@ -503,6 +503,197 @@ pane_line() {
   done
 }
 
+# Draw a tab as the arrangement you would actually see, rather than as a list.
+#
+# Reads one JSON object on stdin: {"width":N, "height":N, "area":{...},
+# "panes":[{"pane_id","rect","status","title","lines":[...]}]}. herdr gives each
+# pane an absolute rect inside the tab's area, so the split tree can be ignored
+# entirely -- scaling the rects into the preview's width reproduces the shape,
+# nesting included.
+#
+# Every cell is written into one character grid, so panes cannot overlap or
+# drift apart the way separately-printed blocks would.
+render_layout() {
+  python3 -c '
+import json, sys, unicodedata
+
+RESET = "\033[0m"
+DIM = "\033[90m"
+DOTS = {
+    "blocked": ("\033[31m", "!"),
+    "working": ("\033[33m", "●"),
+    "idle":    ("\033[32m", "●"),
+    "done":    ("\033[36m", "●"),
+}
+
+d = json.load(sys.stdin)
+panes, area = d["panes"], d["area"]
+W, H = d["width"], d["height"]
+
+def cells(t):
+    return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in t)
+
+def clip(text, width):
+    """Cut to a cell width, never splitting a wide glyph in half."""
+    out, used = [], 0
+    for ch in text:
+        w = 2 if unicodedata.east_asian_width(ch) in "WF" else 1
+        if used + w > width:
+            break
+        out.append(ch)
+        used += w
+    return "".join(out), used
+
+# Map the tab area onto the preview box. Rects are absolute screen coordinates,
+# so subtract the area origin before scaling.
+def sx(x):
+    return round((x - area["x"]) / area["width"] * W)
+
+def sy(y):
+    return round((y - area["y"]) / area["height"] * H)
+
+grid = [[" "] * W for _ in range(H)]
+paint = [[None] * W for _ in range(H)]   # color per cell, applied at the end
+
+def put(x, y, ch, color=None):
+    if 0 <= x < W and 0 <= y < H:
+        grid[y][x] = ch
+        paint[y][x] = color
+
+def put_text(x, y, text, color, limit):
+    """Write text from x, stopping at limit cells.
+
+    A full-width glyph covers two columns but lives in one grid cell, so the
+    column it overhangs is blanked -- otherwise whatever was there (a border
+    dash, the pane beside it) still prints and shoves the row rightwards.
+    """
+    used = 0
+    for ch in text:
+        w = 2 if unicodedata.east_asian_width(ch) in "WF" else 1
+        if used + w > limit:
+            break
+        put(x + used, y, ch, color)
+        if w == 2:
+            put(x + used + 1, y, "", color)
+        used += w
+    return used
+
+for p in panes:
+    r = p["rect"]
+    x0, y0 = sx(r["x"]), sy(r["y"])
+    x1, y1 = sx(r["x"] + r["width"]), sy(r["y"] + r["height"])
+    # Clamp so a rounding overshoot at the far edge cannot fall off the grid.
+    x1, y1 = min(x1, W), min(y1, H)
+    bw, bh = x1 - x0, y1 - y0
+    if bw < 3 or bh < 2:
+        continue   # too small to draw a box with anything inside it
+
+    color, dot = DOTS.get(p.get("status") or "", (DIM, "○"))
+
+    # Border. Adjacent panes share an edge, so a corner drawn by one neighbour
+    # gets overwritten by the next -- harmless, they are the same glyph class.
+    for x in range(x0, x1):
+        put(x, y0, "─", DIM)
+        put(x, y1 - 1, "─", DIM)
+    for y in range(y0, y1):
+        put(x0, y, "│", DIM)
+        put(x1 - 1, y, "│", DIM)
+    put(x0, y0, "┌", DIM); put(x1 - 1, y0, "┐", DIM)
+    put(x0, y1 - 1, "└", DIM); put(x1 - 1, y1 - 1, "┘", DIM)
+
+    # Title row: a status dot then as much of the title as fits.
+    inner = bw - 2
+    if inner >= 2:
+        put(x0 + 1, y0, dot, color)
+        put_text(x0 + 2, y0, " " + (p.get("title") or ""), color, inner - 1)
+
+    # Body: the last lines of the pane itself, newest at the bottom as on a
+    # real terminal.
+    body_h = bh - 2
+    if body_h > 0 and inner > 0:
+        raw = p.get("lines") or []
+        lines = [l for l in raw if l.strip(" \t")][-body_h:]
+        for i, line in enumerate(lines):
+            put_text(x0 + 1, y0 + 1 + i, line, None, inner)
+
+# Emit, opening a color span only where it changes so the output stays compact.
+# Cells holding "" are the second column of a full-width glyph: the character
+# before them already covers this column, so they contribute nothing.
+for y in range(H):
+    row, cur = [], None
+    for x in range(W):
+        ch = grid[y][x]
+        if ch == "":
+            continue
+        c = paint[y][x]
+        if c != cur:
+            row.append(RESET if c is None else c)
+            cur = c
+        row.append(ch)
+    row.append(RESET)
+    sys.stdout.write("".join(row).rstrip() + "\n")
+'
+}
+
+# Preview box for the tab layout, in cells. The preview pane is 50% of the
+# terminal; 56x20 fits a typical split without the drawing dominating the
+# header above it.
+readonly LAYOUT_W=56
+readonly LAYOUT_H=20
+
+# Feed render_layout the geometry and contents of one tab. Fails (non-zero) when
+# herdr reports no usable layout, so the caller can fall back.
+tab_layout() {
+  local tab_id="$1" panes_json first layout body
+
+  panes_json="$(herdr pane list 2>/dev/null)" || return 1
+  first="$(printf '%s' "$panes_json" |
+    jq -r --arg t "$tab_id" 'first(.result.panes[] | select(.tab_id == $t) | .pane_id) // empty')"
+  [ -n "$first" ] || return 1
+
+  # Layout is a property of the tab, reachable through any pane inside it.
+  layout="$(herdr pane layout --pane "$first" 2>/dev/null |
+    jq -c '.result.layout // empty' 2>/dev/null)"
+  [ -n "$layout" ] || return 1
+
+  # Read each pane once, and hand the lines over as JSON so no escaping of the
+  # terminal contents is needed. Colors are dropped: the drawing is far smaller
+  # than the real screen, and the pane borders carry the status color already.
+  body="$(
+    printf '%s' "$layout" | jq -c '.panes[].pane_id' -r | while IFS= read -r pid; do
+      herdr pane read "$pid" --source visible --lines "$LAYOUT_H" 2>/dev/null |
+        jq -Rs --arg id "$pid" '{pane_id: $id, lines: (. / "\n")}'
+    done | jq -sc '.'
+  )"
+
+  jq -cn \
+    --argjson layout "$layout" \
+    --argjson panes "$panes_json" \
+    --argjson body "${body:-[]}" \
+    --argjson w "$LAYOUT_W" --argjson h "$LAYOUT_H" '
+    ($body | map({key: .pane_id, value: .lines}) | from_entries) as $lines
+    | ($panes.result.panes // [] | map({key: .pane_id, value: .}) | from_entries) as $meta
+    | {
+        width: $w, height: $h, area: $layout.area,
+        panes: [ $layout.panes[]
+          | .pane_id as $id
+          | {
+              pane_id: $id,
+              rect: .rect,
+              status: ($meta[$id].agent_status // "unknown"),
+              # Same title rule as the list: a reported summary beats a
+              # terminal title, and a plain shell falls back to its directory.
+              title: (
+                ( ($meta[$id].tokens.codex_title? // $meta[$id].terminal_title_stripped // "")
+                  | gsub("^\\s+|\\s+$"; "") ) as $t
+                | if $t != "" then $t
+                  else (($meta[$id].cwd // "/") | split("/") | last) end
+              ),
+              lines: ($lines[$id] // [])
+            } ]
+      }' | render_layout
+}
+
 # Header block shared by all three preview kinds: a status dot, a bold summary
 # line, an optional second line, then a rule. Keeps the previews visually aligned.
 preview_header() {
@@ -559,9 +750,13 @@ cmd_preview() {
       else
         echo '(no detail)'
       fi
-      herdr pane list 2>/dev/null \
-        | jq -c --arg id "$id" '.result.panes[] | select(.tab_id == $id)' 2>/dev/null \
-        | while IFS= read -r pane; do pane_line "  " "$pane"; done
+      tab_layout "$id" || {
+        # No geometry (herdr too old, or the tab vanished mid-preview): fall
+        # back to the flat list rather than showing nothing.
+        herdr pane list 2>/dev/null \
+          | jq -c --arg id "$id" '.result.panes[] | select(.tab_id == $id)' 2>/dev/null \
+          | while IFS= read -r pane; do pane_line "  " "$pane"; done
+      }
       ;;
     workspace)
       local w

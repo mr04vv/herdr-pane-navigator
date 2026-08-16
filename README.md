@@ -115,7 +115,12 @@ colors as the list:
   exact permission prompt a `blocked` agent is stuck on before jumping. For a
   blocked pane the header's second line is the pending question itself, in place
   of the conversation title.
-- **A tab** shows the panes inside it, each with its status and title.
+- **A tab** is drawn as the arrangement you would actually see: each pane in its
+  real position, scaled down, with its own last lines inside and a status dot on
+  its border. A tab split left/right previews split left/right, nesting
+  included, so you can tell which tab is the one you meant before switching to
+  it. (herdr reports an absolute rectangle per pane, so the drawing follows the
+  real geometry rather than guessing from a split tree.)
 - **A workspace** shows its tabs, with the panes nested under each.
 
 `r` refreshes everything, and `ctrl-u` / `ctrl-d` scroll the preview when the
