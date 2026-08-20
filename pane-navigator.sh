@@ -33,6 +33,22 @@ require() {
   command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
 }
 
+# Optional settings live in config.toml under the plugin's config directory,
+# which herdr creates and exports as HERDR_PLUGIN_CONFIG_DIR; the fallback path
+# is only for running this script by hand, outside a plugin invocation.
+CONFIG_FILE="${HERDR_PLUGIN_CONFIG_DIR:-$HOME/.config/herdr/plugins/config/pane-navigator}/config.toml"
+readonly CONFIG_FILE
+
+# True when the config sets <key> to a TOML true.
+#
+# A grep rather than a parser: every setting is a flat top-level boolean, and no
+# dependency is worth adding for that. Anything else -- false, a missing key, a
+# missing file -- reads as false, so a malformed line keeps the default.
+config_bool() {
+  [ -r "$CONFIG_FILE" ] || return 1
+  grep -qE "^[[:space:]]*$1[[:space:]]*=[[:space:]]*true[[:space:]]*(#.*)?$" "$CONFIG_FILE"
+}
+
 # Emit "<kind> <id> <status> <prefix> <label> <meta>" rows, tab separated.
 #
 # Rows come out as a workspace -> tab -> pane tree. Structure wins over urgency
@@ -837,6 +853,7 @@ cmd_ui() {
   # Modal, vim style. Normal mode is the default: --disabled turns off filtering
   # so j/k/g/G move the cursor, and "/" switches to search. Leaving search with
   # esc drops back to normal mode instead of quitting, so esc only exits search.
+  # start_in_search below flips which mode the navigator opens in.
   #
   # --disabled turns off *filtering*, not typing: an unbound printable key still
   # lands in the query. So normal mode binds `change` to clear-query -- a stray
@@ -860,9 +877,26 @@ cmd_ui() {
   # in normal mode. The escape must go to /dev/tty -- execute-silent discards a
   # command's stdout, so writing to the controlling terminal directly is the only
   # way the DECSCUSR sequence actually reaches the screen.
+
+  # The header lists the keys that are actually live, so it has to move with the
+  # mode: the single letters are gone while searching, and esc means something
+  # there that it does not mean in normal mode.
+  local normal_header='[j/k] move  [/] search  [enter] focus  [tab] select  [y/n] reply  [x] close  [a] agents  [s] all  [r] reload  [p] preview  [q] quit'
+  local search_header='[type] filter  [↑/↓] move  [esc] normal  [enter] focus  [tab] select  [ctrl-a] agents  [ctrl-s] all  [ctrl-r] reload  [ctrl-/] preview'
+
   local mode_keys='j,k,g,G,/,q,a,s,r,p,x,y,n'
-  local enter_search="enable-search+change-prompt(search > )+unbind($mode_keys)+unbind(change)+rebind(esc)+execute-silent(printf \"\\033[1 q\" > /dev/tty)"
-  local enter_normal="change-prompt(herdr | )+rebind($mode_keys)+rebind(change)+unbind(esc)+execute-silent(printf \"\\033[2 q\" > /dev/tty)"
+  local enter_search="enable-search+change-prompt(search > )+change-header($search_header)+unbind($mode_keys)+unbind(change)+rebind(esc)+execute-silent(printf \"\\033[1 q\" > /dev/tty)"
+  local enter_normal="change-prompt(herdr | )+change-header($normal_header)+rebind($mode_keys)+rebind(change)+unbind(esc)+execute-silent(printf \"\\033[2 q\" > /dev/tty)"
+
+  # start_in_search = true opens straight in search mode, for the habit of just
+  # typing to filter. The default is normal mode, where single letters are
+  # commands. Either way the start event runs the very action list the matching
+  # mode key runs, so the two entry points cannot drift apart.
+  local start_actions='unbind(esc)' start_header="$normal_header"
+  if config_bool start_in_search; then
+    start_actions="$enter_search"
+    start_header="$search_header"
+  fi
 
   # Two-step close. `x` only arms it, by writing a flag file and repainting the
   # prompt as a question; `y`/`n` then mean "confirm/cancel the close" instead of
@@ -888,14 +922,14 @@ cmd_ui() {
       --disabled \
       --prompt='herdr | ' \
       --multi \
-      --header='[j/k] move  [/] search  [enter] focus  [tab] select  [y/n] reply  [x] close  [a] agents  [s] all  [r] reload  [p] preview  [q] quit' \
+      --header="$start_header" \
       --info=inline \
       --layout=reverse \
       --border=rounded \
       --height=100% \
       --preview="$self preview {1} {2}" \
       --preview-window='right,50%,border-left,wrap,hidden' \
-      --bind="start:unbind(esc)" \
+      --bind="start:$start_actions" \
       --bind="change:clear-query" \
       --bind="j:down" \
       --bind="k:up" \
