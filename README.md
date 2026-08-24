@@ -45,13 +45,28 @@ description = "navigate workspaces, tabs, and panes by title"
 
 and `herdr server reload-config`.
 
+## Configuration
+
+Optional. Settings live in `config.toml` under the plugin's config directory,
+which herdr creates on install:
+
+```toml
+# ~/.config/herdr/plugins/config/pane-navigator/config.toml
+start_in_search = true
+```
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `start_in_search` | `false` | Open in search mode, so typing filters straight away. `esc` drops to normal mode and the single-letter commands come back. |
+
 ## Keys
 
 The navigator opens in normal mode, so single letters are commands rather than
 query text — a stray key is discarded instead of filtering. `/` switches to
 search; `esc` leaves it but keeps the query and the filtered result, so what you
 typed stays on screen while you move with `j`/`k`. The caret marks the mode:
-steady in normal, blinking while you search.
+steady in normal, blinking while you search. Set `start_in_search` to open the
+other way round.
 
 | Key | Action |
 | --- | --- |
