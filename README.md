@@ -114,20 +114,45 @@ If `y`, `n`, or a close ever appears to do nothing, look in
 nowhere to print — stdout is consumed as fzf's action list — so failures are
 written there instead of being lost.
 
+## Pane names
+
+A pane you named in herdr shows that name, so a shell you called `dev-server`
+reads as `dev-server` rather than as the last segment of its directory — which
+is what two panes in one repo would otherwise both show:
+
+```
+PN  -  ├─ dev-server
+PN  -  └─ tests
+```
+
+The name is matched by the search, so `/dev` goes straight to it. Search reads
+the row as drawn, so a name longer than the label column is only matchable up
+to where it is truncated.
+
+An agent's terminal title still wins the label column, because it tracks what
+the pane is doing now rather than what it was called once. A pane that has both
+keeps its name in the right-hand column instead — still on the row, and still
+searchable:
+
+```
+PN  *  └─ myapp: fix the parser        claude · api
+```
+
 ## Tab titles
 
 An unnamed tab is just `1`, `2`, … in herdr, which says nothing about what is in
 it. Here a tab with no name of its own borrows a title from a pane inside it,
-preferring an agent pane, and keeps its number in the right-hand column as `#1`.
+preferring an agent pane and falling back to a pane's name, and keeps its number
+in the right-hand column as `#1`.
 
 ## Preview
 
 `p` toggles a preview of whatever is selected, headed by a status dot in the same
 colors as the list:
 
-- **A pane** shows a header (agent · status · cwd, plus the conversation title)
-  above its live on-screen output — in the pane's own colors — so you see the
-  exact permission prompt a `blocked` agent is stuck on before jumping. For a
+- **A pane** shows a header (agent or name · status · cwd, plus the conversation
+  title) above its live on-screen output — in the pane's own colors — so you see
+  the exact permission prompt a `blocked` agent is stuck on before jumping. For a
   blocked pane the header's second line is the pending question itself, in place
   of the conversation title.
 - **A tab** is drawn as the arrangement you would actually see: each pane in its
