@@ -14,9 +14,35 @@ set -euo pipefail
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 readonly SELF
 
-# Field separator for row payloads. Tab is safe here because herdr labels come
-# from workspace/tab names and terminal titles, none of which can contain one.
+# Field separator for row payloads. Tab is safe for herdr's own labels and for
+# terminal titles; a pane name is free-form, so pane_name sanitises it.
 readonly SEP=$'\t'
+
+# jq definitions shared by every program that displays a pane, prepended to each
+# rather than repeated in it: jq has no include path here, and the ranking below
+# drifted between copies once already.
+#
+# pane_name is collapsed and stripped, not merely trimmed -- a name is free-form
+# input from `herdr pane rename`, so an interior tab would split a row into an
+# extra column and an escape would misalign the padding format_rows counts.
+# shellcheck disable=SC2016  # $cwd is a jq parameter, not a shell expansion
+readonly JQ_PANE_DEFS='
+  # Agents that never set a terminal title leave something useless there --
+  # Codex prints the raw session UUID -- so a summary reported into pane
+  # metadata (the codex-title Stop hook fills it) wins when present.
+  def pane_title:
+    ((.tokens.codex_title? // .terminal_title_stripped // "")
+     | gsub("^\\s+|\\s+$"; ""));
+  def pane_name:
+    ((.label // "")
+     | gsub("\\s+"; " ") | gsub("[[:cntrl:]]"; "") | gsub("^ | $"; ""));
+  # A title tracks what the pane is doing now; a name is what it was called
+  # once, so it ranks below. $cwd is a fallback the caller has already shaped.
+  def pane_display($cwd):
+    if pane_title != "" then pane_title
+    elif pane_name != "" then pane_name
+    else $cwd end;
+'
 
 # Where the actions bound inside fzf report failures. While fzf owns the screen
 # neither stdout nor stderr is visible -- stdout is consumed as the action list
@@ -49,7 +75,9 @@ config_bool() {
   grep -qE "^[[:space:]]*$1[[:space:]]*=[[:space:]]*true[[:space:]]*(#.*)?$" "$CONFIG_FILE"
 }
 
-# Emit "<kind> <id> <status> <prefix> <label> <meta>" rows, tab separated.
+# Emit "<kind> <id> <status> <prefix> <label> <meta> <agent>" rows, tab
+# separated, because format_rows renders only the first six and the agents
+# view needs a field agent_status cannot supply.
 #
 # Rows come out as a workspace -> tab -> pane tree. Structure wins over urgency
 # for placement, but urgency still decides order *within* each level, and a
@@ -71,7 +99,7 @@ collect_rows() {
     --arg sep "$SEP" \
     --argjson ws "$ws_json" \
     --argjson tabs "$tab_json" \
-    --argjson panes "$pane_json" '
+    --argjson panes "$pane_json" "$JQ_PANE_DEFS"'
     def urgency:
       { "blocked": 0, "done": 1, "working": 2, "idle": 3 }[.] // 4;
 
@@ -80,14 +108,6 @@ collect_rows() {
     # another sibling actually follows.
     def branch(is_last): if is_last then "└─ " else "├─ " end;
     def spine(is_last):  if is_last then "   "  else "│  " end;
-
-    # Display title for a pane. The terminal title is usually right, but agents
-    # that never set one leave something useless there -- Codex prints the raw
-    # session UUID -- so a summary reported into pane metadata (the codex-title
-    # Stop hook fills tokens.codex_title) takes precedence when present.
-    def pane_title:
-      ((.tokens.codex_title? // .terminal_title_stripped // "")
-       | gsub("^\\s+|\\s+$"; ""));
 
     # Drop the navigator'\''s own pane. When prefix+p opens this over a tab, herdr
     # lists the overlay pane too -- so the picker would show a "Pane Navigator"
@@ -136,14 +156,15 @@ collect_rows() {
         | .value.t as $t
         | (
             # An unnamed tab falls back to its own number ("1", "2", ...), which
-            # says nothing. Borrow a title from inside it instead, preferring an
-            # agent pane since that describes actual work; the number is kept as
-            # the meta column so the tab is still identifiable.
+            # says nothing. Borrow a title, or a name, from a pane inside it
+            # instead, preferring an agent pane since that describes actual work;
+            # the number is kept as the meta column so the tab is identifiable.
             ( [ $all_panes[]
                 | select(.tab_id == $t.tab_id)
-                | select(pane_title != "")
+                | (if pane_title != "" then pane_title else pane_name end) as $from_pane
+                | select($from_pane != "")
                 | { rank: (if (.agent_status // "unknown") != "unknown" then 0 else 1 end),
-                    title: pane_title } ]
+                    title: $from_pane } ]
               | sort_by(.rank) | first | .title // "" ) as $borrowed
             | (if ($t.label | test("^[0-9]+$")) and $borrowed != ""
                then $borrowed else $t.label end) as $tab_label
@@ -165,9 +186,17 @@ collect_rows() {
             | (.key == ($sorted_panes | length - 1)) as $pane_last
             | .value.p as $p
             | ($p | pane_title) as $title
+            | ($p | pane_name) as $name
             | [ "pane", $p.pane_id, ($p.agent_status // "unknown"),
                 (spine($tab_last) + branch($pane_last)),
-                (if $title == "" then (($p.cwd // "/") | split("/") | last) else $title end),
+                ($p | pane_display(($p.cwd // "/") | split("/") | last)),
+                # A name the title displaced still belongs on the row, or it
+                # would be neither readable nor searchable.
+                (if $title != "" and $name != ""
+                 then (($p.agent // "") | if . == "" then $name else . + " · " + $name end)
+                 else ($p.agent // "") end),
+                # Past the six columns format_rows renders. agent_status cannot
+                # stand in: herdr reports a named agent as "unknown" too.
                 ($p.agent // "")
               ] | join($sep)
           )
@@ -281,8 +310,14 @@ annotate_blocked() {
       if [ "$state" = blocked ]; then
         reason="$(herdr pane read "$id" --source visible --lines 40 2>/dev/null | blocked_reason)"
         if [ -n "$reason" ]; then
+          # The question replaces the agent name, but a " · <name>" suffix
+          # survives it, so a named pane stays searchable while blocked.
           line="$(printf '%s' "$line" |
-            awk -F'\t' -v r="waiting: $reason" 'BEGIN { OFS = FS } { $6 = r; print }')"
+            awk -F'\t' -v r="waiting: $reason" 'BEGIN { OFS = FS } {
+              i = index($6, " · ")
+              $6 = (i ? r substr($6, i) : r)
+              print
+            }')"
         fi
       fi
     fi
@@ -294,16 +329,11 @@ cmd_list() {
   collect_rows | annotate_blocked | format_rows
 }
 
-# Agent-only view, for the toggle bound below. Panes without a detected agent
-# carry an empty meta field, which is what distinguishes them here; the tree
-# prefixes are dropped since a flat list has no parents to connect to.
-#
-# The agent filter runs before annotate_blocked, because it keys off that same
-# meta column -- annotating first would rewrite it on exactly the blocked rows
-# this view most needs to keep.
+# Agent-only view. Not keyed on agent_status, because herdr reports a named
+# agent as "unknown" whenever its state has not been reported yet.
 cmd_list_agents() {
   collect_rows \
-    | awk -F'\t' 'BEGIN { OFS = FS } $1 == "pane" && $6 != "" { $4 = ""; print }' \
+    | awk -F'\t' 'BEGIN { OFS = FS } $1 == "pane" && $7 != "" { $4 = ""; print }' \
     | annotate_blocked \
     | format_rows
 }
@@ -511,12 +541,11 @@ rule() {
 # tab/workspace previews to list what lives inside.
 pane_line() {
   local indent="$1" pane_json="$2"
-  printf '%s' "$pane_json" | jq -r '
+  printf '%s' "$pane_json" | jq -r "$JQ_PANE_DEFS"'
     def kind: if (.agent // "") != "" then .agent else "shell" end;
-    def title:
-      ((.tokens.codex_title? // .terminal_title_stripped // "") | gsub("^\\s+|\\s+$"; ""));
-    def line: if title != "" then title else (.cwd // "/") end;
-    "\(.agent_status // "unknown")\t\(kind)\t\(line)"
+    # The full path, not its last segment: this list nests under a tab, where
+    # two panes in sibling repos would otherwise read identically.
+    "\(.agent_status // "unknown")\t\(kind)\t\(pane_display(.cwd // "/"))"
   ' 2>/dev/null | while IFS=$'\t' read -r status kind line; do
     printf '%s%s%s %s%-6s%s %s\n' \
       "$indent" "$(status_dot "$status")" "$C_RESET" \
@@ -703,7 +732,7 @@ tab_layout() {
     --argjson layout "$layout" \
     --argjson panes "$panes_json" \
     --argjson body "${body:-[]}" \
-    --argjson w "$lw" --argjson h "$lh" '
+    --argjson w "$lw" --argjson h "$lh" "$JQ_PANE_DEFS"'
     ($body | map({key: .pane_id, value: .lines}) | from_entries) as $lines
     | ($panes.result.panes // [] | map({key: .pane_id, value: .}) | from_entries) as $meta
     | {
@@ -714,14 +743,8 @@ tab_layout() {
               pane_id: $id,
               rect: .rect,
               status: ($meta[$id].agent_status // "unknown"),
-              # Same title rule as the list: a reported summary beats a
-              # terminal title, and a plain shell falls back to its directory.
-              title: (
-                ( ($meta[$id].tokens.codex_title? // $meta[$id].terminal_title_stripped // "")
-                  | gsub("^\\s+|\\s+$"; "") ) as $t
-                | if $t != "" then $t
-                  else (($meta[$id].cwd // "/") | split("/") | last) end
-              ),
+              title: ($meta[$id]
+                | pane_display((.cwd // "/") | split("/") | last)),
               lines: ($lines[$id] // [])
             } ]
       }' | render_layout
@@ -748,8 +771,16 @@ cmd_preview() {
       if [ -n "$p" ]; then
         local status kind_label title cwd
         status="$(printf '%s' "$p" | jq -r '.agent_status // "unknown"')"
-        kind_label="$(printf '%s' "$p" | jq -r 'if (.agent // "") != "" then .agent else "shell" end')"
-        title="$(printf '%s' "$p" | jq -r '((.tokens.codex_title? // .terminal_title_stripped // "") | gsub("^\\s+|\\s+$"; ""))')"
+        # A pane's own name says more than the word "shell", and joins an agent
+        # rather than yielding to it, so the list row and this header agree.
+        kind_label="$(printf '%s' "$p" | jq -r "$JQ_PANE_DEFS"'
+          pane_name as $n
+          | (if (.agent // "") != "" then .agent else "" end) as $a
+          | if $a != "" and $n != "" then $a + " · " + $n
+            elif $a != "" then $a
+            elif $n != "" then $n
+            else "shell" end')"
+        title="$(printf '%s' "$p" | jq -r "$JQ_PANE_DEFS"'pane_title')"
         cwd="$(short_cwd "$(printf '%s' "$p" | jq -r '.cwd // "/"')")"
         # Second line is the conversation title. A shell pane usually has none,
         # or its terminal title is just the cwd -- already in the header, so drop
